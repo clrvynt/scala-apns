@@ -6,6 +6,13 @@ import okhttp3._
 import okio.BufferedSink
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.Implicits.global
+import org.json4s._
+import org.json4s.JsonDSL._
+import org.json4s.jackson.JsonMethods._
+import java.util.Base64
+import java.nio.charset.Charset
+import java.security._
+import java.security.spec.PKCS8EncodedKeySpec
 
 trait BaseApnsClient {
   private val prodGateway = "p"
@@ -71,9 +78,8 @@ case class Notification(token: String, alert:String, title: Option[String] = Non
   import org.json4s._
   import org.json4s.JsonDSL._
   import org.json4s.jackson.JsonMethods._
+
   def toJson = {
-    val r = Map("aps" -> Map("alert" -> Map("body" -> alert, "title" -> title), "sound" -> sound, "badge" -> badge, "category" -> category))
-    
     val j = ("aps" -> 
                 ("alert" -> 
                     ("body" -> alert) ~ ("title" -> title)) ~
@@ -86,6 +92,8 @@ case class Notification(token: String, alert:String, title: Option[String] = Non
 case class NotificationResponse(responseCode: Int, responseBody: String) 
 
 object ProviderApnsClient extends BaseApnsClient with ProviderAuthenticator {
+  private val utf8 = Charset.forName("UTF-8")
+
   private def validateNotification(notif: Notification)(push: Notification => Future[NotificationResponse]) = {
     val d = for {
       _ <- Option(notif.token).toRight("Device Token is required").right
@@ -114,16 +122,40 @@ object ProviderApnsClient extends BaseApnsClient with ProviderAuthenticator {
               mediaType
             }
             override def writeTo(sink: BufferedSink) = {
-              sink.write(notif.toJson.getBytes("utf-8"))
+              sink.write(notif.toJson.getBytes(utf8))
             }
           })
           
+      val promise = Promise[NotificationResponse]()
       rb.addHeader("authorization", s"bearer $jwtToken")
-      Future {
-        NotificationResponse(100, "foo")
-      }
+      val res = client.newCall(rb.build()).enqueue(new Callback {
+        override def onFailure(call: Call, e: IOException): Unit = promise.failure(e)
+        override def onResponse(call: Call, response: Response): Unit = promise.success(NotificationResponse(response.code(), response.body().string()))
+      })
+      promise.future
     }
+  }
+  
+  private def jwtToken = {
+    val now = System.currentTimeMillis / 1000
+    val header = (("alg" -> "ES256") ~ ("kid" -> keyId))
+    val payload = ("iss" -> teamId, "iat" -> now)
     
+    val p = Base64.getUrlEncoder.encodeToString(compact(render(header)).getBytes(utf8)) 
+    s"${p}.${es256(p)}"
+  }
+  
+  private def es256(data: String) = {
+    val kf = KeyFactory.getInstance("EC")
+    val keyspec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getBytes()))
+    val pk = kf.generatePrivate(keyspec)
+    
+    val sha = Signature.getInstance("SHA256withECDSA")
+    sha.initSign(pk)
+    sha.update(data.getBytes(utf8))
+    
+    val signed = sha.sign()
+    Base64.getUrlEncoder.encodeToString(signed)
   }
 }
 
