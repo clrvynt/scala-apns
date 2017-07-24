@@ -9,5 +9,6 @@ lazy val root = (project in file(".")).
     )),
     name := "scala-apns",
     libraryDependencies += scalaTest % Test,
-    libraryDependencies += "com.squareup.okhttp3" % "okhttp" % "3.8.1"
+    libraryDependencies += "com.squareup.okhttp3" % "okhttp" % "3.8.1",
+    libraryDependencies += "org.json4s" %% "json4s-jackson" % "3.5.2"
   )	

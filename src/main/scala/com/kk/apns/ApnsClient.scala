@@ -56,9 +56,10 @@ trait ProviderAuthenticator { self: BaseApnsClient =>
 }
 
 object Extensions {
-  implicit class MapExtensions(m: Map[_, Option[_]]) {
-    def flatten = m.collect {
+  implicit class MapExtensions(m: Map[_, _]) {
+    def flat: Map[_ , _] = m.collect {
       case (key, Some(value)) => key -> value
+      case (key, v: Map[_, _]) => key -> v.flat
     }
   }
 }
@@ -67,9 +68,18 @@ case class Aps(aps: Map[String, Any])
 case class Notification(token: String, alert:String, title: Option[String] = None, 
     sound: Option[String] = None, category: Option[String] = None,
     badge: Option[Int] = None) {
-  import Extensions._
+  import org.json4s._
+  import org.json4s.JsonDSL._
+  import org.json4s.jackson.JsonMethods._
   def toJson = {
-    Aps(Map("
+    val r = Map("aps" -> Map("alert" -> Map("body" -> alert, "title" -> title), "sound" -> sound, "badge" -> badge, "category" -> category))
+    
+    val j = ("aps" -> 
+                ("alert" -> 
+                    ("body" -> alert) ~ ("title" -> title)) ~
+                ("sound" -> sound) ~ ("badge" -> badge) ~ ("category" -> category))
+                
+    compact(render(j))
   }
 }
     
@@ -104,9 +114,11 @@ object ProviderApnsClient extends BaseApnsClient with ProviderAuthenticator {
               mediaType
             }
             override def writeTo(sink: BufferedSink) = {
-              sink.write(notif.getPayload().getBytes(Constants.UTF_8))
+              sink.write(notif.toJson.getBytes("utf-8"))
             }
           })
+          
+      rb.addHeader("authorization", s"bearer $jwtToken")
       Future {
         NotificationResponse(100, "foo")
       }
