@@ -14,151 +14,172 @@ import java.nio.charset.Charset
 import java.security._
 import java.security.spec.PKCS8EncodedKeySpec
 
-trait BaseApnsClient {
-  private val prodGateway = "p"
-  private val devGateway = "d"
+trait BaseApnsClientBuilder {
+  private val prodGateway = "https://api.push.apple.com"
+  private val devGateway = "https://api.development.push.apple.com"
   private var isProd = false
   private var _topic: String = ""
-
   val mediaType = MediaType.parse("application/json")
+  val utf8 = Charset.forName("UTF-8")
 
-  def withProdGateway(b: Boolean): BaseApnsClient = {
+  def withProdGateway(b: Boolean): BaseApnsClientBuilder = {
     isProd = b
     this
   }
   def gateway = if (isProd) prodGateway else devGateway
 
-  def withTopic(topic: String): BaseApnsClient = {
+  def withTopic(topic: String): BaseApnsClientBuilder = {
     _topic = topic
     this
   }
   def topic = _topic
 
-  var client: OkHttpClient = new OkHttpClient()
+  def createRequest(payload: String, token: String)(fn: Request.Builder => Call): Call = {
+    val rb = new Request.Builder().url(s"${gateway}/3/device/${token}").post(
+      new RequestBody() {
+        override def contentType: MediaType = {
+          mediaType
+        }
+        override def writeTo(sink: BufferedSink) = {
+          sink.write(payload.getBytes(utf8))
+        }
+      })
+    rb.header("apns-topic", topic)
+    fn(rb)
+  }
+
+  def validateClient(f: Unit => BaseApnsClient): Either[IllegalArgumentException, BaseApnsClient]
+  def clientBuilder: BaseApnsClient
+  def build: Option[BaseApnsClient] = {
+    val t = validateClient { _ =>
+      clientBuilder
+    }
+    t.right.toOption
+  }
 }
 
-trait ProviderAuthenticator { self: BaseApnsClient =>
+trait ProviderApnsClientBuilder extends BaseApnsClientBuilder { self: BaseApnsClient =>
   private var _key: String = ""
   private var _keyId: String = ""
   private var _teamId: String = ""
-
   def key = _key
   def keyId = _keyId
   def teamId = _teamId
+  var c: OkHttpClient = new OkHttpClient()
 
-  def withApnsAuthKey(key: String): BaseApnsClient = {
+  def withApnsAuthKey(key: String): ProviderApnsClientBuilder = {
     _key = key
     this
   }
 
-  def withKeyId(keyId: String): BaseApnsClient = {
+  def withKeyId(keyId: String): ProviderApnsClientBuilder = {
     _keyId = keyId
     this
   }
 
-  def withTeamId(teamId: String): BaseApnsClient = {
+  def withTeamId(teamId: String): ProviderApnsClientBuilder = {
     _teamId = teamId
     this
   }
-}
 
-object Extensions {
-  implicit class MapExtensions(m: Map[_, _]) {
-    def flat: Map[_ , _] = m.collect {
-      case (key, Some(value)) => key -> value
-      case (key, v: Map[_, _]) => key -> v.flat
-    }
-  }
-}
-
-case class Aps(aps: Map[String, Any])
-case class Notification(token: String, alert:String, title: Option[String] = None, 
-    sound: Option[String] = None, category: Option[String] = None,
-    badge: Option[Int] = None) {
-  import org.json4s._
-  import org.json4s.JsonDSL._
-  import org.json4s.jackson.JsonMethods._
-
-  def toJson = {
-    val j = ("aps" -> 
-                ("alert" -> 
-                    ("body" -> alert) ~ ("title" -> title)) ~
-                ("sound" -> sound) ~ ("badge" -> badge) ~ ("category" -> category))
-                
-    compact(render(j))
-  }
-}
-    
-case class NotificationResponse(responseCode: Int, responseBody: String) 
-
-object ProviderApnsClient extends BaseApnsClient with ProviderAuthenticator {
-  private val utf8 = Charset.forName("UTF-8")
-
-  private def validateNotification(notif: Notification)(push: Notification => Future[NotificationResponse]) = {
-    val d = for {
-      _ <- Option(notif.token).toRight("Device Token is required").right
-      _ <- Option(notif.alert).toRight("Notification Alert is required").right
-    } yield notif
-    
-    d.fold(l => Future.failed(new IllegalArgumentException(l)), push)
-  }
-  
-  private def validateClient(run: Unit => Future[NotificationResponse]) = {
+  override def validateClient(run: Unit => BaseApnsClient) = {
     val d = for {
       _ <- Option(teamId).toRight("Team ID is required").right
       _ <- Option(keyId).toRight("Key ID is required").right
       _ <- Option(key).toRight("Auth Key is required").right
+      _ <- Option(topic).toRight("Topic is required").right
     } yield ()
-    
-    d.fold(l => Future.failed(new IllegalArgumentException(l)), run)
-  }
-  
-  
-  def push(n: Notification): Future[NotificationResponse] = validateClient { _ =>
-    validateNotification(n) { notif =>
-      val rb = new Request.Builder().url(s"${gateway}/3/device/${notif.token}").post(
-          new RequestBody() {
-            override def contentType: MediaType = {
-              mediaType
-            }
-            override def writeTo(sink: BufferedSink) = {
-              sink.write(notif.toJson.getBytes(utf8))
-            }
-          })
-          
-      val promise = Promise[NotificationResponse]()
-      rb.addHeader("authorization", s"bearer $jwtToken")
-      val res = client.newCall(rb.build()).enqueue(new Callback {
-        override def onFailure(call: Call, e: IOException): Unit = promise.failure(e)
-        override def onResponse(call: Call, response: Response): Unit = promise.success(NotificationResponse(response.code(), response.body().string()))
-      })
-      promise.future
+
+    d match {
+      case Left(l)  => Left(new IllegalArgumentException(l))
+      case Right(_) => Right(run(()))
     }
   }
-  
-  private def jwtToken = {
-    val now = System.currentTimeMillis / 1000
-    val header = (("alg" -> "ES256") ~ ("kid" -> keyId))
-    val payload = ("iss" -> teamId, "iat" -> now)
-    
-    val p = Base64.getUrlEncoder.encodeToString(compact(render(header)).getBytes(utf8)) 
-    s"${p}.${es256(p)}"
+
+  override def clientBuilder: BaseApnsClient = {
+    this
   }
-  
+
+}
+
+trait BaseApnsClient {
+
+  def validateNotification(notif: Notification)(push: Notification => Future[NotificationResponse]) = {
+    val d = for {
+      _ <- Option(notif.token).toRight("Device Token is required").right
+      _ <- Option(notif.alert).toRight("Notification Alert is required").right
+    } yield notif
+
+    d.fold(l => Future.failed(new IllegalArgumentException(l)), push)
+  }
+
+  def push(notification: Notification): Future[NotificationResponse] = validateNotification(notification) { notif =>
+    val promise = Promise[NotificationResponse]()
+    val res = call(notif.toJson, notif.token).enqueue(new Callback {
+      override def onFailure(call: Call, e: IOException): Unit = promise.failure(e)
+      override def onResponse(call: Call, response: Response): Unit = promise.success(NotificationResponse(response.code(), response.body().string()))
+    })
+    promise.future
+  }
+
+  def call(payload: String, token: String): Call
+}
+
+trait ProviderApnsClient extends BaseApnsClient with ProviderApnsClientBuilder {
+
+  var lastTimestamp: Long = 0
+  var cachedToken: Option[String] = None
+  override def call(payload: String, token: String) = createRequest(payload, token) { rb =>
+    rb.addHeader("authorization", s"bearer $jwtToken")
+    c.newCall(rb.build())
+  }
+
+  private def jwtToken = {
+
+    val now = System.currentTimeMillis / 1000
+    if (cachedToken == None || now - lastTimestamp > 55 * 60 * 1000) {
+      val header = (("alg" -> "ES256") ~ ("kid" -> keyId))
+      val payload = ("iss" -> teamId) ~ ("iat" -> now)
+
+      val p1 = enc(compact(render(header)))
+      val p2 = enc(compact(render(payload)))
+      val p3 = s"$p1.$p2"
+      cachedToken = Some(s"${p3}.${es256(p3)}")
+      lastTimestamp = now
+    }
+    cachedToken.get
+  }
+
+  private def enc(p: String) = Base64.getUrlEncoder.encodeToString(p.getBytes(utf8))
+
   private def es256(data: String) = {
     val kf = KeyFactory.getInstance("EC")
     val keyspec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getBytes()))
     val pk = kf.generatePrivate(keyspec)
-    
+
     val sha = Signature.getInstance("SHA256withECDSA")
     sha.initSign(pk)
     sha.update(data.getBytes(utf8))
-    
+
     val signed = sha.sign()
     Base64.getUrlEncoder.encodeToString(signed)
   }
 }
 
-object RequestValidator {
-  
+case class Notification(token: String, alert: String, title: Option[String] = None,
+                        sound: Option[String] = None, category: Option[String] = None,
+                        badge: Option[Int] = None) {
+
+  def toJson = {
+    val j = ("aps" ->
+      ("alert" ->
+        ("body" -> alert) ~ ("title" -> title)) ~
+        ("sound" -> sound) ~ ("badge" -> badge) ~ ("category" -> category))
+
+    compact(render(j))
+  }
 }
+
+case class NotificationResponse(responseCode: Int, responseBody: String)
+
+object ProviderApnsClient extends ProviderApnsClient
