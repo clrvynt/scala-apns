@@ -21,7 +21,7 @@ Make sure you add the alpn jar file as part of your bootclasspath of your Scala 
 ## Usage
 
 ```scala
-val pa = ProviderApnsClient
+val pa = ProviderApnsClientBuilder
           .withApnsAuthKey(pk).withKeyId(keyId).withTeamId(teamId).withTopic("com.kk.apns")
           .withProdGateway(gateway).build
           
