@@ -34,20 +34,6 @@ trait BaseApnsClientBuilder {
   }
   def topic = _topic
 
-  def createRequest(payload: String, token: String)(fn: Request.Builder => Call): Call = {
-    val rb = new Request.Builder().url(s"${gateway}/3/device/${token}").post(
-      new RequestBody() {
-        override def contentType: MediaType = {
-          mediaType
-        }
-        override def writeTo(sink: BufferedSink) = {
-          sink.write(payload.getBytes(utf8))
-        }
-      })
-    rb.header("apns-topic", topic)
-    fn(rb)
-  }
-
   def validateClient(f: Unit => BaseApnsClient): Either[IllegalArgumentException, BaseApnsClient]
   def clientBuilder: BaseApnsClient
   def build: Option[BaseApnsClient] = {
@@ -58,7 +44,7 @@ trait BaseApnsClientBuilder {
   }
 }
 
-trait ProviderApnsClientBuilder extends BaseApnsClientBuilder { self: BaseApnsClient =>
+trait ProviderApnsClientBuilder extends BaseApnsClientBuilder { 
   private var _key: String = ""
   private var _keyId: String = ""
   private var _teamId: String = ""
@@ -97,12 +83,27 @@ trait ProviderApnsClientBuilder extends BaseApnsClientBuilder { self: BaseApnsCl
   }
 
   override def clientBuilder: BaseApnsClient = {
-    this
+    new ProviderApnsClient(this)
   }
 
 }
 
-trait BaseApnsClient {
+abstract class BaseApnsClient(builder: BaseApnsClientBuilder) {
+  
+  def createRequest(payload: String, token: String)(fn: Request.Builder => Call): Call = {
+    val rb = new Request.Builder().url(s"${builder.gateway}/3/device/${token}").post(
+      new RequestBody() {
+        override def contentType: MediaType = {
+          builder.mediaType
+        }
+        override def writeTo(sink: BufferedSink) = {
+          sink.write(payload.getBytes(builder.utf8))
+        }
+      })
+    rb.header("apns-topic", builder.topic)
+    fn(rb)
+  }
+
 
   def validateNotification(notif: Notification)(push: Notification => Future[NotificationResponse]) = {
     val d = for {
@@ -125,21 +126,21 @@ trait BaseApnsClient {
   def call(payload: String, token: String): Call
 }
 
-trait ProviderApnsClient extends BaseApnsClient with ProviderApnsClientBuilder {
+class ProviderApnsClient(builder: ProviderApnsClientBuilder) extends BaseApnsClient(builder) {
 
   var lastTimestamp: Long = 0
   var cachedToken: Option[String] = None
   override def call(payload: String, token: String) = createRequest(payload, token) { rb =>
     rb.addHeader("authorization", s"bearer $jwtToken")
-    c.newCall(rb.build())
+    builder.c.newCall(rb.build())
   }
 
   private def jwtToken = {
 
     val now = System.currentTimeMillis / 1000
     if (cachedToken == None || now - lastTimestamp > 55 * 60 * 1000) {
-      val header = (("alg" -> "ES256") ~ ("kid" -> keyId))
-      val payload = ("iss" -> teamId) ~ ("iat" -> now)
+      val header = (("alg" -> "ES256") ~ ("kid" -> builder.keyId))
+      val payload = ("iss" -> builder.teamId) ~ ("iat" -> now)
 
       val p1 = enc(compact(render(header)))
       val p2 = enc(compact(render(payload)))
@@ -150,16 +151,16 @@ trait ProviderApnsClient extends BaseApnsClient with ProviderApnsClientBuilder {
     cachedToken.get
   }
 
-  private def enc(p: String) = Base64.getUrlEncoder.encodeToString(p.getBytes(utf8))
+  private def enc(p: String) = Base64.getUrlEncoder.encodeToString(p.getBytes(builder.utf8))
 
   private def es256(data: String) = {
     val kf = KeyFactory.getInstance("EC")
-    val keyspec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(key.getBytes()))
+    val keyspec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(builder.key.getBytes()))
     val pk = kf.generatePrivate(keyspec)
 
     val sha = Signature.getInstance("SHA256withECDSA")
     sha.initSign(pk)
-    sha.update(data.getBytes(utf8))
+    sha.update(data.getBytes(builder.utf8))
 
     val signed = sha.sign()
     Base64.getUrlEncoder.encodeToString(signed)
@@ -182,4 +183,4 @@ case class Notification(token: String, alert: String, title: Option[String] = No
 
 case class NotificationResponse(responseCode: Int, responseBody: String)
 
-object ProviderApnsClient extends ProviderApnsClient
+object ProviderApnsClientBuilder extends ProviderApnsClientBuilder
