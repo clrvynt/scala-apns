@@ -1,5 +1,5 @@
 # scala-apns
-Simple APNS repo with a Provider Authentication 
+Simple Scala APNS Library that uses Apple's HTTP/2 API
 
 ## Requires ALPN
 Make sure you add the alpn jar file as part of your bootclasspath of your Scala runtime's JVM ( Play framework / Spray etc ). This won't be required from Java 9 onwards. See [here](http://www.eclipse.org/jetty/documentation/current/alpn-chapter.html) for more information.
