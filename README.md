@@ -27,9 +27,27 @@ val pa = ProviderApnsClientBuilder
           
           
 pa.map { client =>
-  val notif = new Notification(token = t, alert = "Hi there! This is a push notification")
+  val notif = Notification(token = t, alert = "Hi there! This is a push notification")
   client.push(notif).map { r =>
-    print(r.responseCode)
+    print(r.map(_.responseCode))
   }
 } 
 ```
+## Sending to multiple devices
+
+```scala
+val tokens = Seq("token1", "token2", "token3")
+pa.map { client =>
+  tokens.map { t =>
+    // Push command returns a Future[Seq[NotificationResponse]] 
+    client.push(Notification(token=t, alert = "Hi there! This is a push notification")).map { r =>
+      r.map(print(_.responseCode))
+    }
+  }
+}
+```
+  
+ 
+}
+  
+  
