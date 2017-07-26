@@ -8,7 +8,7 @@ Make sure you add the alpn jar file as part of your bootclasspath of your Scala 
 -Xbootclasspath/p:<path_to_alpn_boot_jar>
 ```
 
-## What you need
+## What you need for Provider Authentication
 
   * TeamID -- This is a 10 character alphanumeric code for your iOS Dev team
   * KeyID -- Create this key from the "Keys" section inside your developer account
@@ -25,14 +25,30 @@ val pa = ProviderApnsClientBuilder
           .withApnsAuthKey(pk).withKeyId(keyId).withTeamId(teamId).withTopic("com.kk.apns")
           .withProdGateway(gateway).build
           
-          
-pa.map { client =>
-  val notif = Notification(token = t, alert = "Hi there! This is a push notification")
-  client.push(notif).map { r =>
-    print(r.map(_.responseCode))
-  }
+pa match {
+  case Success(v) =>
+    client.push(Notification(token=t, alert = "Hi there! This is a push notification")
+    v.push(notif).map { r => print(r.map(_.responseCode)) }
+  case Failure(f) =>
+    print("Exception creating client")
 } 
 ```
+
+## What you need for Certificate Authentication
+
+  * Certificate -- An InputStream that represents the push certificate
+  * Password -- Certificate password
+  * topic -- This is typically your bundle identifier ( com.kk.apns )
+
+## Usage
+
+```scala
+val ca = CertApnsClientBuilder
+           .withCertificate(is).withPassword("foo").withProdGateway(gateway).withTopic("com.kk.apns").build
+           
+```
+
+
 ## Sending to multiple devices
 
 ```scala
