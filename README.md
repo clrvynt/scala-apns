@@ -1,5 +1,5 @@
 # scala-apns
-Simple APNS repo with a Provider Authentication 
+Simple Scala APNS Library that uses Apple's HTTP/2 API
 
 ## Requires ALPN
 Make sure you add the alpn jar file as part of your bootclasspath of your Scala runtime's JVM ( Play framework / Spray etc ). This won't be required from Java 9 onwards. See [here](http://www.eclipse.org/jetty/documentation/current/alpn-chapter.html) for more information.
@@ -21,15 +21,30 @@ Make sure you add the alpn jar file as part of your bootclasspath of your Scala 
 ## Usage
 
 ```scala
-val pa = ProviderApnsClient
+val pa = ProviderApnsClientBuilder
           .withApnsAuthKey(pk).withKeyId(keyId).withTeamId(teamId).withTopic("com.kk.apns")
           .withProdGateway(gateway).build
           
           
 pa.map { client =>
-  val notif = new Notification(token = t, alert = "Hi there! This is a push notification")
+  val notif = Notification(token = t, alert = "Hi there! This is a push notification")
   client.push(notif).map { r =>
-    print(r.responseCode)
+    print(r.map(_.responseCode))
   }
 } 
 ```
+## Sending to multiple devices
+
+```scala
+val tokens = Seq("token1", "token2", "token3")
+pa.map { client =>
+  tokens.map { t =>
+    // Push command returns a Future[Seq[NotificationResponse]] 
+    client.push(Notification(token=t, alert = "Hi there! This is a push notification")).map { r =>
+      r.map(print(_.responseCode))
+    }
+  }
+}
+```
+
+  
