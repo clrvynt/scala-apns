@@ -13,11 +13,26 @@ import java.util.Base64
 import java.nio.charset.Charset
 import java.security._
 import java.security.spec.PKCS8EncodedKeySpec
+import java.io.InputStream
+import java.security.cert.X509Certificate
+import javax.net.ssl._
+
+trait ValidationHelpers {
+    def valid(str: String, keyName: String, isEmptyAllowed: Boolean = false): Try[String] = {
+    Try({
+       Option(str) match {
+         case Some(su) if (isEmptyAllowed || !su.trim.isEmpty) => su
+         case _ => throw new IllegalArgumentException(s"$keyName is required")
+       }
+    })
+  }
+    
+}
 
 trait BaseApnsClientBuilder {
   private val prodGateway = "https://api.push.apple.com"
   private val devGateway = "https://api.development.push.apple.com"
-  private var isProd = false
+  var isProd = false
   private var _topic: String = ""
   val mediaType = MediaType.parse("application/json")
   val utf8 = Charset.forName("UTF-8")
@@ -34,20 +49,19 @@ trait BaseApnsClientBuilder {
   }
   def topic = _topic
 
-  def validateClient(f: Unit => BaseApnsClient): Either[IllegalArgumentException, BaseApnsClient]
+  def validateClient(f: Unit => BaseApnsClient): Try[BaseApnsClient]
   def clientBuilder: BaseApnsClient
-  def build: Option[BaseApnsClient] = {
-    val t = validateClient { _ =>
+  def build: Try[BaseApnsClient] = {
+    validateClient { _ =>
       clientBuilder
     }
-    t.right.toOption
   }
 }
 
-trait ProviderApnsClientBuilder extends BaseApnsClientBuilder { 
-  private var _key: String = ""
-  private var _keyId: String = ""
-  private var _teamId: String = ""
+trait ProviderApnsClientBuilder extends BaseApnsClientBuilder with ValidationHelpers { 
+  private var _key: String = null
+  private var _keyId: String = null
+  private var _teamId: String = null
   def key = _key
   def keyId = _keyId
   def teamId = _teamId
@@ -69,23 +83,92 @@ trait ProviderApnsClientBuilder extends BaseApnsClientBuilder {
   }
 
   override def validateClient(run: Unit => BaseApnsClient) = {
-    val d = for {
-      _ <- Option(teamId).toRight("Team ID is required").right
-      _ <- Option(keyId).toRight("Key ID is required").right
-      _ <- Option(key).toRight("Auth Key is required").right
-      _ <- Option(topic).toRight("Topic is required").right
-    } yield ()
-
-    d match {
-      case Left(l)  => Left(new IllegalArgumentException(l))
-      case Right(_) => Right(run(()))
-    }
+    for {
+      _ <- valid(teamId, "Team ID")
+      _ <- valid(keyId, "Key ID")
+      _ <- valid(key, "Key")
+      _ <- valid(topic, "Topic")
+    } yield (run(()))
   }
-
+  
   override def clientBuilder: BaseApnsClient = {
     new ProviderApnsClient(this)
   }
 
+}
+
+trait CertApnsClientBuilder extends BaseApnsClientBuilder with ValidationHelpers {
+  private var _cert: InputStream = null
+  private var _password: String = ""
+  var c: OkHttpClient = null
+  
+  def withCertificate(is: InputStream): CertApnsClientBuilder = {
+    _cert = is
+    this
+  }
+  def certificate = _cert
+  
+  def withPassword(p: String): CertApnsClientBuilder = {
+    _password = p
+    this
+  }
+  def password = _password
+  
+  override def validateClient(run: Unit => BaseApnsClient) = {
+    for {
+      _ <- validateCertificate
+      _ <- valid(password, "Password", true)
+      _ <- valid(topic, "Topic")
+    } yield (run(()))
+  }
+  
+  private def validateCertificate: Try[X509Certificate] = {
+    Try({
+      val c = cert
+      c.checkValidity
+      val names = c.getSubjectDN.getName.split(", ").map(s => s.split("=")).map {  case Array(f1, f2) => (f1, f2) } toMap
+      
+      names.get("CN") match {
+        case Some(v) =>
+          if (v.toLowerCase.contains("push") && 
+              ( (isProd && v.toLowerCase.contains("production")) || (!isProd && v.toLowerCase.contains("development")) ) )
+            v
+          else 
+            throw ex
+        case None =>
+          throw ex
+      }
+      c
+    })
+  }
+  
+  private def keystore = {
+    val ks = KeyStore.getInstance("PKCS12");
+    ks.load(certificate, password.toCharArray())
+    ks
+  }
+  
+  private def cert = keystore.getCertificate(keystore.aliases().nextElement()).asInstanceOf[X509Certificate]
+  private val ex = new IllegalArgumentException("Bad certificate")
+
+  override def clientBuilder: BaseApnsClient = {
+    val ks = keystore
+    val cert =  keystore.getCertificate(keystore.aliases().nextElement()).asInstanceOf[X509Certificate]
+    val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+    kmf.init(ks, password.toCharArray())
+    val keyManagers = kmf.getKeyManagers()
+    val sslContext = SSLContext.getInstance("TLS")
+    val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+    tmf.init(null.asInstanceOf[KeyStore])
+    sslContext.init(keyManagers, tmf.getTrustManagers(), null)
+    val sslSocketFactory = sslContext.getSocketFactory()
+    
+    val builder = new OkHttpClient.Builder()
+    builder.sslSocketFactory(sslSocketFactory)
+    
+    c = builder.build
+    null    
+  }
 }
 
 abstract class BaseApnsClient(builder: BaseApnsClientBuilder) {
@@ -136,7 +219,6 @@ class ProviderApnsClient(builder: ProviderApnsClientBuilder) extends BaseApnsCli
   }
 
   private def jwtToken = {
-
     val now = System.currentTimeMillis / 1000
     if (cachedToken == None || now - lastTimestamp > 55 * 60 * 1000) {
       val header = (("alg" -> "ES256") ~ ("kid" -> builder.keyId))
@@ -167,6 +249,15 @@ class ProviderApnsClient(builder: ProviderApnsClientBuilder) extends BaseApnsCli
   }
 }
 
+class CertApnsClient(builder: CertApnsClientBuilder) extends BaseApnsClient(builder) {
+
+  var lastTimestamp: Long = 0
+  var cachedToken: Option[String] = None
+  override def call(payload: String, token: String) = createRequest(payload, token) { rb =>
+    builder.c.newCall(rb.build())
+  }
+}
+
 case class Notification(token: String, alert: String, title: Option[String] = None,
                         sound: Option[String] = None, category: Option[String] = None,
                         badge: Option[Int] = None) {
@@ -184,3 +275,4 @@ case class Notification(token: String, alert: String, title: Option[String] = No
 case class NotificationResponse(responseCode: Int, responseBody: String)
 
 object ProviderApnsClientBuilder extends ProviderApnsClientBuilder
+object CertApnsClientBuilder extends CertApnsClientBuilder
